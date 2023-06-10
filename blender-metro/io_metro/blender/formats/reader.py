@@ -94,6 +94,11 @@ class MetroReader:
 
         return float(b)
 
+    def read_double(self) -> float:
+        b = self.get_struct("@d")[0]
+
+        return float(b)
+
     def read_bool(self) -> bool:
         r = self.read_u8()
 

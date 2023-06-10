@@ -1,8 +1,9 @@
+import bpy
 import math
 import bmesh
 import dataclasses
 
-from mathutils import Vector
+from mathutils import Vector, Matrix, Quaternion
 
 from io_metro.blender.utils import *
 from io_metro.blender.formats.model import *
@@ -11,10 +12,22 @@ from io_metro.blender.formats.texture_tool import convert_metro_texture
 
 
 @dataclasses.dataclass
+class BlenderBone:
+    name: str = ""
+    bone_parent: str = ""
+
+    position: Vector = dataclasses.field(default_factory=Vector)
+    rotation: Quaternion = dataclasses.field(default_factory=Quaternion)
+
+
+@dataclasses.dataclass
 class BlenderPoly:
     pos: Vector = dataclasses.field(default_factory=Vector)
     uv: Vector = dataclasses.field(default_factory=Vector)
     normal: Vector = dataclasses.field(default_factory=Vector)
+
+    bone: BlenderBone = dataclasses.field(default_factory=BlenderBone)
+    weight: float = 0
 
 
 @dataclasses.dataclass
@@ -33,12 +46,20 @@ class BlenderMaterial:
 class BlenderUtils:
     @staticmethod
     def decode_uv(uv: Vec2F) -> Vector:
-        scale_factor = 2048.0
+        return Vector((uv.x, uv.y))
 
-        x = uv.x / scale_factor
-        y = uv.y / scale_factor
+    @staticmethod
+    def decode_level_uv(uv0: Vec2S, uv1: Vec2S) -> [Vector, Vector]:
+        scale_factor = 1024.0
+        light_scale_factor = 32767.0
 
-        return Vector((x, -y))
+        x0 = uv0.x / scale_factor
+        y0 = uv0.y / scale_factor
+
+        x1 = uv1.x / light_scale_factor
+        y1 = uv1.y / light_scale_factor
+
+        return Vector((x0, y0)), Vector((x1, y1))
 
     @staticmethod
     def decode_skinned_uv(uv: Vec2S) -> Vector:
@@ -47,7 +68,7 @@ class BlenderUtils:
         x = uv.x / scale_factor
         y = uv.y / scale_factor
 
-        return Vector((x, -y))
+        return Vector((x, y))
 
     @staticmethod
     def decode_normal(normal: int) -> [Vector, int]:
@@ -56,7 +77,7 @@ class BlenderUtils:
         z = (((normal & 0x000000FF) >> 0) / 255) * 2 - 1
         vao = ((normal & 0xFF000000) >> 24) / 255
 
-        return Vector((x, y, z)), vao
+        return Vector((x, z, y)), vao
 
     @staticmethod
     def decode_position(pos: Vec3F) -> Vector:
@@ -64,7 +85,7 @@ class BlenderUtils:
         y = pos.z
         z = pos.y
 
-        return Vector((-x, -y, z))
+        return Vector((-x, y, z))
 
     @staticmethod
     def decode_skinned_position(pos: Vec4S) -> Vector:
@@ -74,7 +95,7 @@ class BlenderUtils:
         y = pos.z / scale_factor
         z = pos.y / scale_factor
 
-        return Vector((-x, -y, z))
+        return Vector((-x, y, z))
 
 
 @dataclasses.dataclass
@@ -86,6 +107,42 @@ class BlenderMesh:
     material: BlenderMaterial = dataclasses.field(default_factory=BlenderMaterial)
 
     def create_mesh(self):
+        def create_blender_object(mesh):
+            # create a new mesh object and link it to the scene
+            obj = create_object(f"{self.name}_object", mesh)
+
+            # add material
+            dds_path = convert_metro_texture(self.material.texture)
+
+            new_material = bpy.data.materials.new(name=f"{self.name}_material")
+            new_material.use_nodes = True
+
+            if dds_path:
+                shader = new_material.node_tree.nodes["Principled BSDF"]
+
+                new_texture = new_material.node_tree.nodes.new('ShaderNodeTexImage')
+                new_texture.image = bpy.data.images.load(dds_path)
+
+                new_material.node_tree.links.new(shader.inputs['Base Color'], new_texture.outputs['Color'])
+
+            if obj.data.materials:
+                obj.data.materials[0] = new_material
+            else:
+                obj.data.materials.append(new_material)
+
+            return obj
+
+        def create_blender_armature():
+            armature_data = bpy.data.armatures.new('4A_Armature')
+            armature_object = bpy.data.objects.new('4A_Armature', armature_data)
+            bpy.context.collection.objects.link(armature_object)
+
+            bpy.context.view_layer.objects.active = armature_object
+
+            return armature_object, armature_data
+
+        blender_armature, blender_armature_data = None, None
+
         #  create bmesh
         bm = bmesh.new()
 
@@ -93,6 +150,9 @@ class BlenderMesh:
         for tri in self.vertex:
             v = bm.verts.new((tri.pos.x, tri.pos.y, tri.pos.z))
             v.normal = Vector((tri.normal.x, tri.normal.y, tri.normal.z))
+
+            if tri.bone and tri.bone.name != "":
+                blender_armature, blender_armature_data = create_blender_armature()
 
         bm.verts.ensure_lookup_table()
         bm.verts.index_update()
@@ -129,27 +189,12 @@ class BlenderMesh:
         bm.to_mesh(bpy_mesh)
         bm.free()
 
-        # create a new mesh object and link it to the scene
-        obj = create_object(f"{self.name}_object", bpy_mesh)
+        # make blender object
+        blender_object = create_blender_object(bpy_mesh)
 
-        # add material
-        dds_path = convert_metro_texture(self.material.texture)
-
-        new_material = bpy.data.materials.new(name=f"{self.name}_material")
-        new_material.use_nodes = True
-
-        if dds_path:
-            shader = new_material.node_tree.nodes["Principled BSDF"]
-
-            new_texture = new_material.node_tree.nodes.new('ShaderNodeTexImage')
-            new_texture.image = bpy.data.images.load(dds_path)
-
-            new_material.node_tree.links.new(shader.inputs['Base Color'], new_texture.outputs['Color'])
-
-        if obj.data.materials:
-            obj.data.materials[0] = new_material
-        else:
-            obj.data.materials.append(new_material)
+        if blender_armature:
+            blender_object.parent = blender_armature
+            blender_object.parent_type = 'ARMATURE'
 
 
 class BlenderFactory:
@@ -185,7 +230,7 @@ class BlenderFactory:
             for vertex in part.vertex:
                 poly = BlenderPoly()
                 poly.pos = BlenderUtils.decode_position(vertex.position)
-                poly.uv = BlenderUtils.decode_skinned_uv(vertex.uv0)
+                poly.uv, light_map_uv = BlenderUtils.decode_level_uv(vertex.uv0, vertex.uv1)
                 poly.normal, vao = BlenderUtils.decode_normal(vertex.normal)
 
                 mesh.vertex.append(poly)
@@ -227,7 +272,7 @@ class BlenderFactory:
 
             return mesh
 
-        def convert_mesh(skl: Mesh):
+        def convert_mesh(skl: Mesh, skeleton: ModelSkeleton = None):
             mesh = BlenderMesh()
             mesh.name = skl.material.name
             mesh.material = BlenderMaterial(skl.material.texture, skl.material.shader)
@@ -265,17 +310,17 @@ class BlenderFactory:
         if model.model_skeleton:
             if model.model_skeleton.lod0 and lod_type == 0:
                 for sk_mesh in model.model_skeleton.lod0:
-                    bm = convert_mesh(sk_mesh)
+                    bm = convert_mesh(sk_mesh, model.model_skeleton)
                     r.append(bm)
 
             if model.model_skeleton.lod1 and lod_type == 1:
                 for sk_mesh in model.model_skeleton.lod1:
-                    bm = convert_mesh(sk_mesh)
+                    bm = convert_mesh(sk_mesh, model.model_skeleton)
                     r.append(bm)
 
             if model.model_skeleton.lod2 and lod_type == 2:
                 for sk_mesh in model.model_skeleton.lod2:
-                    bm = convert_mesh(sk_mesh)
+                    bm = convert_mesh(sk_mesh, model.model_skeleton)
                     r.append(bm)
 
         return r

@@ -1,7 +1,7 @@
 bl_info = {
     'name': '4A Engine Tools',
     'author': 'Arkadii',
-    'version': (0, 1, 4),
+    'version': (0, 2, 0),
     'blender': (2, 80, 0),
     'category': 'Import-Export',
     'location': 'File > Import/Export',

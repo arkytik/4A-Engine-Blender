@@ -1,6 +1,5 @@
 import dataclasses
 
-from io_metro.blender.formats.math import *
 from io_metro.blender.formats.config_reader import *
 
 
@@ -17,9 +16,9 @@ class ParentMapped:
         self.parent_bone = reader.read_str()
         self.self_bone = reader.read_str()
 
-        self.q.read(reader.get_reader())
-        self.t.read(reader.get_reader())
-        self.s.read(reader.get_reader())
+        self.q = reader.read_vec4f()
+        self.t = reader.read_vec3f()
+        self.s = reader.read_vec3f()
 
 
 @dataclasses.dataclass
@@ -32,8 +31,8 @@ class BoneBase:
     def read(self, reader: ConfigReader):
         self.name = reader.read_str()
         self.parent = reader.read_str()
-        self.q.read(reader.get_reader())
-        self.t.read(reader.get_reader())
+        self.q = reader.read_vec4f()
+        self.t = reader.read_vec3f()
 
 
 @dataclasses.dataclass
@@ -44,8 +43,11 @@ class Bone(BoneBase):
     def read(self, reader: ConfigReader):
         super().read(reader)
 
-        self.bp = reader.read_u8()
-        self.bpf = reader.read_u8()
+        if reader.get_type() == ConfigType.Debug:
+            self.bp = reader.read_u16("bp")
+        else:
+            self.bp = reader.read_u8()
+            self.bpf = reader.read_u8()
 
 
 @dataclasses.dataclass
@@ -126,9 +128,9 @@ class MetroDrivenBone:
     use_anim_poses: bool = False
 
     def read(self, reader: ConfigReader, procedural_ver: int = 0):
-        self.bone = reader.read_str()
-        self.driver = reader.read_str()
-        self.driver_parent = reader.read_str()
+        self.bone = reader.read_choose()
+        self.driver = reader.read_choose()
+        self.driver_parent = reader.read_choose()
 
         self.component = reader.read_u8()
         self.twister = reader.read_str()
@@ -169,16 +171,16 @@ class MetroDynamicBone:
         self.damping = reader.read_fp32()
 
         if procedural_ver >= 9:
-            self.pos_min_limits.read(reader.get_reader())
-            self.pos_max_limits.read(reader.get_reader())
-            self.rot_min_limits.read(reader.get_reader())
-            self.rot_max_limits.read(reader.get_reader())
+            self.pos_min_limits = reader.read_vec3f()
+            self.pos_max_limits = reader.read_vec3f()
+            self.rot_min_limits = reader.read_vec3f()
+            self.rot_max_limits = reader.read_vec3f()
 
         if procedural_ver < 9:
-            self.constraints.read(reader.get_reader())
+            self.constraints = reader.read_vec3f()
 
         if procedural_ver >= 6:
-            self.rot_limits.read(reader.get_reader())
+            self.rot_limits = reader.read_vec3f()
 
         if procedural_ver >= 4:
             self.use_world_pos = reader.read_bool()
@@ -204,9 +206,13 @@ class ParentBones:
         self.bone_strs = []
         self.bone_names = reader.read_str()
 
-        for i in range(reader.read_u32()):
+        bone_strs_array, bone_strs_count = reader.read_array("bone_strs")
+
+        for i in range(bone_strs_count):
+            rec = bone_strs_array.read_section(f"rec_{i:04d}")
+
             pb = ParentBone()
-            pb.read(reader)
+            pb.read(rec)
 
             self.bone_strs.append(pb)
 
@@ -253,14 +259,14 @@ class MetroConstrainedBone:
         self.use_anim_poses = reader.read_bool()
 
         if version == 7:
-            self.pos_limits.read(reader.get_reader())
-            self.rot_limits.read(reader.get_reader())
+            self.pos_limits = reader.read_vec3f()
+            self.rot_limits = reader.read_vec3f()
 
         if version > 7:
-            self.pos_min_limits.read(reader.get_reader())
-            self.pos_max_limits.read(reader.get_reader())
-            self.rot_min_limits.read(reader.get_reader())
-            self.rot_max_limits.read(reader.get_reader())
+            self.pos_min_limits = reader.read_vec3f()
+            self.pos_max_limits = reader.read_vec3f()
+            self.rot_min_limits = reader.read_vec3f()
+            self.rot_max_limits = reader.read_vec3f()
             self.up_type = reader.read_u8()
             self.up.read(reader)
 
@@ -286,7 +292,7 @@ class MetroPartition:
 
     def read(self, reader: ConfigReader):
         self.name = reader.read_str()
-        self.in_fl = [reader.read_u8() for i in range(reader.read_u32())]
+        self.in_fl = reader.read_array_u8()
 
 
 @dataclasses.dataclass
@@ -333,7 +339,7 @@ class MetroIkChain:
         self.b0 = reader.read_u16()
         self.b1 = reader.read_u16()
         self.b2 = reader.read_u16()
-        self.knee_dir.read(reader.get_reader())
+        self.knee_dir = reader.read_vec3f()
         self.knee_lim = reader.read_fp32()
 
         if version > 8:
@@ -389,9 +395,13 @@ class MotionsCollection:
         self.name = reader.read_str()
         self.path = reader.read_str()
 
-        for i in range(reader.read_u32()):
+        mots_array, mots_count = reader.read_array("mots")
+
+        for i in range(mots_count):
+            rec = mots_array.read_section(f"rec_{i:04d}")
+
             mw = MetroWeightedMotion()
-            mw.read(reader)
+            mw.read(rec)
 
             self.motions.append(mw)
 
@@ -433,167 +443,204 @@ class Skeleton:
     motions_str: str = ""
 
     def read(self, reader: ConfigReader):
-        self.version = reader.read_u32()
-        self.checksum = reader.read_u32()
+        def read_ddk():
+            if self.version >= 7:
+                self.driven_bones = []
+                driven_bones_array, driven_bones_count = skeleton_section.read_array("driven_bones")
+
+                for j in range(driven_bones_count):
+                    sec = driven_bones_array.read_section(f"rec_{j:04d}")
+
+                    driven_bone = MetroDrivenBone()
+                    driven_bone.read(sec)
+
+                    self.driven_bones.append(driven_bone)
+
+            if self.version >= 8:
+                self.dynamic_bones = []
+                dynamic_bones_array, dynamic_bones_count = skeleton_section.read_array("dynamic_bones")
+
+                for j in range(dynamic_bones_count):
+                    sec = dynamic_bones_array.read_section(f"rec_{j:04d}")
+
+                    dynamic_bone = MetroDynamicBone()
+                    dynamic_bone.read(sec)
+
+                    self.dynamic_bones.append(dynamic_bone)
+
+            if self.version >= 9:
+                self.constrained_bones = []
+                constrained_bones_array, constrained_bones_count = skeleton_section.read_array("constrained_bones")
+
+                for j in range(constrained_bones_count):
+                    sec = constrained_bones_array.read_section(f"rec_{j:04d}")
+
+                    constrained_bone = MetroConstrainedBone()
+                    constrained_bone.read(sec)
+
+                    self.constrained_bones.append(constrained_bone)
+
+        skeleton_section = reader.read_section("skeleton")
+
+        if not skeleton_section or not skeleton_section.more():
+            raise Exception("Skeleton Section In Nullable!")
+
+        self.version = skeleton_section.read_u32()
+        self.checksum = skeleton_section.read_u32()
 
         if self.version <= 14:
-            self.face_fx = reader.read_str()
+            self.face_fx = skeleton_section.read_str()
 
         if self.version >= 17:
-            self.pfnn = reader.read_str()
+            self.pfnn = skeleton_section.read_str()
 
         if self.version >= 21:
-            self.has_as = reader.read_bool()
+            self.has_as = skeleton_section.read_bool()
 
-        self.motions = reader.read_str()
+        self.motions = skeleton_section.read_str()
 
         if self.version >= 13:
-            self.source_info = reader.read_str()
+            self.source_info = skeleton_section.read_str()
 
         if self.version >= 14:
-            self.parent_skeleton = reader.read_str()
+            self.parent_skeleton = skeleton_section.read_str()
             self.parent_bone_maps = []
 
-            for i in range(reader.read_u32()):
+            parent_bones_maps_array, parent_bones_maps_count = skeleton_section.read_array("parent_bone_maps")
+
+            for _ in range(parent_bones_maps_count):
                 p_map = ParentMapped()
-                p_map.read(reader)
+                p_map.read(parent_bones_maps_array)
 
                 self.parent_bone_maps.append(p_map)
 
         self.bones = []
         self.locators = []
 
-        for i in range(reader.read_u32()):
+        bones_array, bones_count = skeleton_section.read_array("bones")
+        for i in range(bones_count):
+            rec = bones_array.read_section(f"rec_{i:04d}")
+
             bone = Bone()
-            bone.read(reader)
+            bone.read(rec)
 
             self.bones.append(bone)
 
-        for i in range(reader.read_u32()):
+        locators_array, locators_count = skeleton_section.read_array("locators")
+        for i in range(locators_count):
+            rec = locators_array.read_section(f"rec_{i:04d}")
+
             locator = Locator()
-            locator.read(reader)
+            locator.read(rec)
 
             self.locators.append(locator)
 
         if self.version >= 6:
             self.bones_aux = []
 
-            for i in range(reader.read_u32()):
+            bones_aux_array, bones_aux_count = skeleton_section.read_array("aux_bones")
+            for i in range(bones_aux_count):
+                rec = bones_aux_array.read_section(f"rec_{i:04d}")
+
                 bone_aux = BoneAux()
-                bone_aux.read(reader, self.version)
+                bone_aux.read(rec, self.version)
 
                 self.bones_aux.append(bone_aux)
 
         if self.version >= 11:
-            self.procedural_ver = reader.read_u32()
+            self.procedural_ver = skeleton_section.read_u32()
 
             if self.procedural_ver > 1:
                 self.procedural_bones = []
-                for i in range(reader.read_u32()):
+
+                procedural_bones_array, procedural_bones_count = skeleton_section.read_array("procedural_bones")
+                for i in range(procedural_bones_count):
+                    rec = procedural_bones_array.read_section(f"rec_{i:04d}")
+
                     procedural_bone = MetroProceduralBone()
-                    procedural_bone.read(reader)
+                    procedural_bone.read(rec)
 
                     self.procedural_bones.append(procedural_bone)
 
-            self.driven_bones = []
-            for i in range(reader.read_u32()):
-                driven_bone = MetroDrivenBone()
-                driven_bone.read(reader)
-
-                self.driven_bones.append(driven_bone)
-
-            self.dynamic_bones = []
-            for i in range(reader.read_u32()):
-                dynamic_bone = MetroDynamicBone()
-                dynamic_bone.read(reader)
-
-                self.dynamic_bones.append(dynamic_bone)
-
-            self.constrained_bones = []
-            for i in range(reader.read_u32()):
-                constrained_bone = MetroConstrainedBone()
-                constrained_bone.read(reader)
-
-                self.constrained_bones.append(constrained_bone)
+            read_ddk()
 
             if self.version >= 20:
                 self.param_bones = []
-                for i in range(reader.read_u32()):
+
+                param_bones_array, param_bones_count = skeleton_section.read_array("param_bones")
+                for i in range(param_bones_count):
+                    rec = param_bones_array.read_section(f"rec_{i:04d}")
+
                     param_bone = MetroParamBone()
-                    param_bone.read(reader)
+                    param_bone.read(rec)
 
                     self.param_bones.append(param_bone)
         else:
-            if self.version >= 7:
-                self.driven_bones = []
-
-                for i in range(reader.read_u32()):
-                    driven_bone = MetroDrivenBone()
-                    driven_bone.read(reader)
-
-                    self.driven_bones.append(driven_bone)
-
-            if self.version >= 8:
-                self.dynamic_bones = []
-
-                for i in range(reader.read_u32()):
-                    dynamic_bone = MetroDynamicBone()
-                    dynamic_bone.read(reader)
-
-                    self.dynamic_bones.append(dynamic_bone)
-
-            if self.version >= 9:
-                self.constrained_bones = []
-
-                for i in range(reader.read_u32()):
-                    constrained_bone = MetroConstrainedBone()
-                    constrained_bone.read(reader)
-
-                    self.constrained_bones.append(constrained_bone)
+            read_ddk()
 
         self.partitions = []
-        for i in range(reader.read_u32()):
+
+        partitions_array, partitions_count = skeleton_section.read_array("partitions")
+        for i in range(partitions_count):
+            rec = partitions_array.read_section(f"rec_{i:04d}")
+
             partition = MetroPartition()
-            partition.read(reader)
+            partition.read(rec)
 
             self.partitions.append(partition)
 
         self.ik_chains = []
-        for i in range(reader.read_u32()):
+
+        ik_chains_array, ik_chains_count = skeleton_section.read_array("ik_chains")
+        for i in range(ik_chains_count):
+            rec = ik_chains_array.read_section(f"rec_{i:04d}")
+
             ik_chain = MetroIkChain()
-            ik_chain.read(reader)
+            ik_chain.read(rec)
 
             self.ik_chains.append(ik_chain)
 
         self.fixed_bones = []
-        for i in range(reader.read_u32()):
+
+        fixed_bones_array, fixed_bones_count = skeleton_section.read_array("fixed_bones")
+        for i in range(fixed_bones_count):
+            rec = fixed_bones_array.read_section(f"rec_{i:04d}")
+
             fb = MetroFixedBone()
-            fb.read(reader)
+            fb.read(rec)
 
             self.fixed_bones.append(fb)
 
         self.params = []
-        for i in range(reader.read_u32()):
+
+        params_array, params_count = skeleton_section.read_array("params")
+        for i in range(params_count):
+            rec = params_array.read_section(f"rec_{i:04d}")
+
             param = MetroSkelParam()
-            param.read(reader)
+            param.read(rec)
 
             self.params.append(param)
 
         self.motions_col = []
-        for i in range(reader.read_u32()):
+
+        motions_col_array, motions_col_count = skeleton_section.read_array("mcolls")
+        for i in range(motions_col_count):
+            rec = motions_col_array.read_section(f"rec_{i:04d}")
+
             motion_col = MotionsCollection()
-            motion_col.read(reader)
+            motion_col.read(rec)
 
             self.motions_col.append(motion_col)
 
         if self.version == 5:
-            dbg_show_obbs = [reader.read_u32() for i in range(reader.read_u32())]
-            dbg_show_bones = [reader.read_u32() for i in range(reader.read_u32())]
-            dbg_show_names = [reader.read_u32() for i in range(reader.read_u32())]
-            dbg_show_axis = [reader.read_u32() for i in range(reader.read_u32())]
-            dbg_show_links = [reader.read_u32() for i in range(reader.read_u32())]
+            dbg_show_obbs = skeleton_section.read_array_u32()
+            dbg_show_bones = skeleton_section.read_array_u32()
+            dbg_show_names = skeleton_section.read_array_u32()
+            dbg_show_axis = skeleton_section.read_array_u32()
+            dbg_show_links = skeleton_section.read_array_u32()
 
             print(dbg_show_obbs, dbg_show_bones, dbg_show_names, dbg_show_axis, dbg_show_links)
 
-        if reader.more():
-            raise Exception(f"Not All Skeleton Data Read: {reader.get_reader().offset} <> {reader.get_reader().size}")
+        if reader.more() or skeleton_section.more():
+            raise Exception(f"Not All Skeleton Data Read: R[{reader.get_reader().offset} <> {reader.get_reader().size}] OR S[{skeleton_section.get_reader().offset} <> {skeleton_section.get_reader().size}]")

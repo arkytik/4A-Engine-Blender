@@ -2,6 +2,7 @@
 Mesh Common Structures
 """
 import dataclasses
+import os.path
 from typing import List
 from pathlib import Path
 
@@ -253,15 +254,20 @@ class ModelFaces:
     shadow_faces_count: int = 0
 
     def read(self, reader: MetroReader, header: ModelHeader):
-        if header and header.get_type() == ModelType.Skin:
-            self.faces_count = reader.read_u16()
-        else:
-            self.faces_count = reader.read_u32()
+        self.faces_count = 0
+        self.shadow_faces_count = 0
 
-        if header and header.version >= MetroVersion.Arktika1_Early.value:
+        if header and (header.get_type() != ModelType.Hierarchy and header.get_type() != ModelType.Std):
+            if header.version < MetroVersion.OG_LastLight_Early.value:
+                self.faces_count = int(reader.read_u32() / 3)
+            else:
+                self.faces_count = reader.read_u16()
+                self.shadow_faces_count = reader.read_u16()
+        elif header and header.version >= MetroVersion.Arktika1_Early.value:
+            self.faces_count = reader.read_u32()
             self.shadow_faces_count = reader.read_u16()
         else:
-            self.faces_count = int(self.faces_count / 3)
+            self.faces_count = int(reader.read_u32() / 3)
 
         self.faces = []
         self.shadow_faces = []
@@ -294,7 +300,7 @@ class ModelSkinnedVertex:
     def read(self, reader: MetroReader, header: ModelHeader):
         self.bone_count = reader.read_u8()
 
-        self.bone_IDs = [reader.read_u8() for i in range(self.bone_count)]
+        self.bone_IDs = [reader.read_u8() for _ in range(self.bone_count)]
         self.bone_OBBs = []
 
         for i in range(self.bone_count):
@@ -398,11 +404,31 @@ class ModelSkeleton:
     lod2: List[Mesh] = dataclasses.field(default_factory=list)
 
     def read(self, reader: MetroReader):
-        def read_lod(lod_reader: MetroReader, lod_n: List[Mesh]):
+        def read_lod(lod_reader: MetroReader, lod_arr: List[Mesh]):
             m = Model()
             m.read(lod_reader)
 
-            lod_n.extend(m.meshes)
+            lod_arr.extend(m.meshes)
+
+        def read_lod_by_path(lodes_path: str, lod_arr: List[Mesh]) -> bool:
+            if not lodes_path:
+                return False
+
+            lodes_path = lodes_path.strip()
+
+            if "," in lodes_path:
+                for lod_path in lodes_path.split(","):
+                    read_lod_by_path(lod_path.strip(), lod_arr)
+            else:
+                lod_path = reader.make_content_path(fr"meshes\{lodes_path}.mesh")
+
+                if not os.path.exists(lod_path):
+                    return False
+
+                lod_reader = MetroReader(bin_path=lod_path)
+                read_lod(lod_reader, lod_arr)
+
+            return True
 
         while reader.more():
             chunk = Chunk()
@@ -411,12 +437,19 @@ class ModelSkeleton:
             if chunk.id == ModelChunkType.SkeletonBonesCRC.value:
                 self.crc.read(reader)
 
-            if chunk.id == ModelChunkType.SkeletonLink:
+            if chunk.id == ModelChunkType.SkeletonInline.value:
+                config_reader = ConfigReader(chunk.reader)
+
+                self.skeleton = Skeleton()
+                self.skeleton.read(config_reader)
+
+            if chunk.id == ModelChunkType.SkeletonLink.value:
                 sk_path = chunk.reader.make_content_path(fr"meshes\{chunk.reader.read_str()}.skeleton.bin")
 
                 sk_reader = MetroReader(bin_path=sk_path)
                 config_reader = ConfigReader(sk_reader)
 
+                self.skeleton = Skeleton()
                 self.skeleton.read(config_reader)
 
             if chunk.id == ModelChunkType.MeshesLinks.value:
@@ -425,22 +458,16 @@ class ModelSkeleton:
                 if links_count != 3:
                     raise Exception(f"Links Count Must Be 3: {links_count} <> 3")
 
-                lod0_path, lod1_path, lod2_path = [
-                    chunk.reader.make_content_path(fr"meshes\{chunk.reader.read_str()}.mesh")
-                    for i in range(links_count)
-                ]
+                lod0_path, lod1_path, lod2_path = [chunk.reader.read_str() for i in range(links_count)]
 
                 if lod0_path:
-                    lod0_reader = MetroReader(bin_path=lod0_path)
-                    read_lod(lod0_reader, self.lod0)
+                    read_lod_by_path(lod0_path, self.lod0)
 
                 if lod1_path:
-                    lod1_reader = MetroReader(bin_path=lod1_path)
-                    read_lod(lod1_reader, self.lod1)
+                    read_lod_by_path(lod1_path, self.lod1)
 
                 if lod2_path:
-                    lod2_reader = MetroReader(bin_path=lod2_path)
-                    read_lod(lod2_reader, self.lod2)
+                    read_lod_by_path(lod2_path, self.lod2)
 
             if chunk.id == ModelChunkType.MeshesInline.value:
                 lod0_chunk = Chunk()
