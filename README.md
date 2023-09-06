@@ -14,3 +14,6 @@ Blender Plugin for 4A Engine Formats. Can Import/Export models and levels from 4
 5. Reload blender and using my plugin (File -> Import, File -> Export)
 
 _P.S. It's just pre-alpha version with many bugs, write all ur problems to "Issues"!_
+
+## Thanks
+Specials Thanks To Sergei "iOrange" (https://github.com/iOrange/)
